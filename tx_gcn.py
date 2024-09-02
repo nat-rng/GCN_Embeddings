@@ -1,8 +1,7 @@
 import pandas as pd
 import networkx as nx
-import numpy as np
 import torch
-from torch_geometric.data import Data
+from torch_geometric.transforms import RandomNodeSplit
 from torch_geometric.nn import GCNConv
 import torch.nn.functional as F
 from torch_geometric.utils import from_networkx
@@ -52,12 +51,10 @@ model = GCN(num_features=num_features, hidden_dim=hidden_dims).to(device)
 data = data.to(device)
 
 num_nodes = data.num_nodes
-train_percent = 0.8
-train_mask = torch.zeros(num_nodes, dtype=torch.bool)
-train_indices = torch.randperm(num_nodes)[:int(num_nodes * train_percent)]
-train_mask[train_indices] = True
+num_val = int(0.1 * num_nodes)
 
-data.train_mask = train_mask
+transform = RandomNodeSplit(split='train_rest', num_splits=1, num_train_per_class=20, num_val=num_val, num_test=0)
+data = transform(data)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 criterion = torch.nn.CrossEntropyLoss()
@@ -71,9 +68,32 @@ def train():
     optimizer.step()
     return loss.item()
 
-for epoch in range(50):
-    loss = train()
-    print(f'Epoch {epoch+1}, Loss: {loss:.4f}')
+def validate():
+    model.eval()
+    with torch.no_grad():
+        out = model(data)[0]
+        val_loss = criterion(out[data.val_mask], data.y[data.val_mask]).item()
+    return val_loss
+
+best_val_loss = float('inf')
+best_model_path = None
+num_epochs = 100
+
+for epoch in range(num_epochs):
+    train_loss = train()
+    val_loss = validate()
+    
+    model_filename = f'model_epoch_{epoch+1}_val_loss_{val_loss:.4f}.pt'
+    torch.save(model.state_dict(), 'gcn_models/' + model_filename)
+    
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        best_model_path = model_filename
+    
+    print(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+
+print(f'Loading best model from {best_model_path} with Val Loss: {best_val_loss:.4f}')
+model.load_state_dict(torch.load(best_model_path))
 
 model.eval()
 with torch.no_grad():
@@ -83,7 +103,6 @@ with torch.no_grad():
 
 embeddings_df = pd.DataFrame(embeddings, columns=[f'emb_{i}' for i in range(embeddings.shape[1])])
 embeddings_df['predicted_class'] = predicted_classes
-
 embeddings_df['actual_class'] = data.y.cpu().numpy()
 
 node_ids = [node for node in G.nodes()]
